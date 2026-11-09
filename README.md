@@ -38,12 +38,17 @@ luci-app-device-curfew/
 
 前往 **[Releases 最新发布页](https://github.com/fishyo/luci-app-device-curfew/releases)** 获取预构建安装包：
 
-- **传统固件（支持 opkg）**：
-  下载 `luci-app-device-curfew_1.0.0-1_all.ipk`，在 LuCI 后台的 **【系统】 -> 【软件包】 -> 【上传软件包】** 安装，或执行：
+- **OpenWrt 25.x / 24.10 固件（使用 apk）**：
+  下载 `luci-app-device-curfew-1.0.0-r1.apk` 并执行：
   ```sh
-  opkg install luci-app-device-curfew_*.ipk
+  apk add --allow-untrusted luci-app-device-curfew-1.0.0-r1.apk
   ```
-- **现代/全平台通用便携安装（适用于 OpenWrt 24.10 / 25.x apk 固件或任意环境）**：
+- **OpenWrt 21.02 ~ 23.05 固件（使用 opkg）**：
+  下载 `luci-app-device-curfew_1.0.0-1_all.ipk`，在 LuCI 后台的 **系统 -> 软件包 -> 上传软件包** 安装，或执行：
+  ```sh
+  opkg install luci-app-device-curfew_1.0.0-1_all.ipk
+  ```
+- **全平台通用便携安装**：
   下载 `luci-app-device-curfew_1.0.0-1_portable.tar.gz` 并执行：
   ```sh
   tar -zxvf luci-app-device-curfew_1.0.0-1_portable.tar.gz -C /
