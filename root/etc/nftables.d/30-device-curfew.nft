@@ -1,0 +1,23 @@
+# NFTables configuration for luci-app-device-curfew
+# Raw priority hook intercepts traffic before transparent proxy (OpenClash / Nikki)
+# DHCPv4 / DHCPv6 and IPv6 neighbor discovery are strictly accepted so the
+# device never loses its IP lease or reports Wi-Fi failure.
+
+set device_curfew_blacklist {
+	type ether_addr
+}
+
+chain prerouting_device_curfew {
+	type filter hook prerouting priority raw; policy accept;
+
+	# Exemption 1: DHCPv4 (bootpc 68 -> bootps 67)
+	udp sport 68 udp dport 67 accept
+
+	# Exemption 2: DHCPv6 (client 546 -> server 547)
+	udp sport 546 udp dport 547 accept
+
+	# Exemption 3: ICMPv6 router / neighbor discovery
+	icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+
+	ether saddr @device_curfew_blacklist counter drop
+}

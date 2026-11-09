@@ -1,0 +1,48 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2026 OpenWrt.org
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG="/usr/bin/device_curfew_ctl"
+
+ensure_cron() {
+	[ -x /etc/init.d/cron ] || return 0
+	# Many images ship with cron disabled; curfews depend on it.
+	/etc/init.d/cron enabled || /etc/init.d/cron enable
+	/etc/init.d/cron start >/dev/null 2>&1
+}
+
+start_service() {
+	[ -x "$PROG" ] || return 1
+	ensure_cron
+
+	# sync also makes sure the nftables set exists
+	$PROG sync
+	$PROG update_cron
+}
+
+stop_service() {
+	[ -x "$PROG" ] || return 1
+
+	# Clear blacklist on stop
+	nft flush set inet fw4 device_curfew_blacklist 2>/dev/null
+
+	# Remove cron entries
+	if grep -q 'device_curfew_ctl' /etc/crontabs/root 2>/dev/null; then
+		sed -i '/device_curfew_ctl/d' /etc/crontabs/root
+		/etc/init.d/cron restart >/dev/null 2>&1
+	fi
+}
+
+reload_service() {
+	[ -x "$PROG" ] || return 1
+	ensure_cron
+	$PROG sync
+	$PROG update_cron
+}
+
+service_triggers() {
+	procd_add_reload_trigger "device_curfew"
+}

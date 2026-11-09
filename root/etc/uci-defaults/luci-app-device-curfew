@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# Register fw4 script include: restores the blacklist after every firewall reload
+if [ "$(uci -q get firewall.device_curfew)" != "include" ]; then
+	uci -q batch <<-EOF
+		set firewall.device_curfew=include
+		set firewall.device_curfew.type='script'
+		set firewall.device_curfew.path='/usr/share/device_curfew/firewall.include'
+		set firewall.device_curfew.fw4_compatible='1'
+		commit firewall
+	EOF
+fi
+
+# Migrate rule.client references from section names to MAC addresses.
+# Anonymous section names (cfgXXXXXX) are content hashes and not stable.
+for r in $(uci -q -X show device_curfew | sed -n 's/^device_curfew\.\([^.=]*\)=rule$/\1/p'); do
+	ref=$(uci -q get "device_curfew.$r.client")
+	[ -n "$ref" ] || continue
+	echo "$ref" | grep -qE '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$' && continue
+	mac=$(uci -q get "device_curfew.$ref.mac")
+	[ -n "$mac" ] && uci -q set "device_curfew.$r.client=$(echo "$mac" | tr 'A-Z' 'a-z')"
+done
+uci -q commit device_curfew
+
+if [ -x /etc/init.d/cron ]; then
+	/etc/init.d/cron enable
+	/etc/init.d/cron start >/dev/null 2>&1
+fi
+
+chmod +x /usr/bin/device_curfew_ctl /usr/share/device_curfew/firewall.include 2>/dev/null
+
+/etc/init.d/device_curfew enable
+/etc/init.d/firewall reload
+/etc/init.d/device_curfew restart
+
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null
+
+exit 0

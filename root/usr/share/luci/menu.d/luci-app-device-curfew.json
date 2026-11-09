@@ -1,0 +1,10 @@
+{
+	"admin/services/device_curfew": {
+		"title": "设备网络宵禁",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "device_curfew/overview"
+		}
+	}
+}

@@ -1,0 +1,12 @@
+#!/bin/sh
+# fw4 script include for luci-app-device-curfew.
+# A firewall reload rebuilds "table inet fw4" and empties the blacklist set,
+# so re-apply the current curfew state afterwards.
+
+[ -x /usr/bin/device_curfew_ctl ] || exit 0
+/etc/init.d/device_curfew enabled 2>/dev/null || exit 0
+
+# Run detached so a held lock can never stall the firewall reload
+( /usr/bin/device_curfew_ctl sync >/dev/null 2>&1 & )
+
+exit 0

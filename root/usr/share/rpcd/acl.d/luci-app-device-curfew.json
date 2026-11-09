@@ -1,0 +1,29 @@
+{
+	"luci-app-device-curfew": {
+		"description": "Grant access to device curfew control",
+		"read": {
+			"cgi-io": [ "exec", "download" ],
+			"uci": [ "device_curfew" ],
+			"file": {
+				"/usr/bin/device_curfew_ctl": [ "exec" ],
+				"/tmp/dhcp.leases": [ "read" ],
+				"/proc/net/arp": [ "read" ]
+			},
+			"ubus": {
+				"file": [ "read", "exec" ],
+				"uci": [ "*" ]
+			}
+		},
+		"write": {
+			"cgi-io": [ "exec" ],
+			"uci": [ "device_curfew" ],
+			"file": {
+				"/usr/bin/device_curfew_ctl": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "read", "exec" ],
+				"uci": [ "*" ]
+			}
+		}
+	}
+}

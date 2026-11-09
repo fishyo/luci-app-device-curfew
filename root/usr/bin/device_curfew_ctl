@@ -1,0 +1,409 @@
+#!/bin/sh
+# Copyright (C) 2026 OpenWrt.org
+# Device Schedule & Parental Control Controller
+
+UCI_CONFIG="device_curfew"
+NFT_TABLE="inet fw4"
+NFT_SET="device_curfew_blacklist"
+CTL="/usr/bin/device_curfew_ctl"
+CRON_FILE="/etc/crontabs/root"
+CRON_TAG="# device_curfew"
+LOCK_FILE="/var/lock/device_curfew.lock"
+MAC_RE='^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'
+
+log() {
+	logger -t device_curfew "$1"
+}
+
+to_lower() {
+	echo "$1" | tr 'A-Z' 'a-z'
+}
+
+# Print $1 if it is a non-negative integer, otherwise 0
+to_int() {
+	case "$1" in
+		''|*[!0-9]*) echo 0 ;;
+		*) echo "$1" ;;
+	esac
+}
+
+valid_mac() {
+	echo "$1" | grep -qE "$MAC_RE"
+}
+
+# Convert HH:MM into minutes since midnight. Returns 1 on invalid input.
+hhmm_to_mins() {
+	local t="$1" h m
+	echo "$t" | grep -qE '^([01]?[0-9]|2[0-3]):[0-5][0-9]$' || return 1
+	h=${t%%:*}
+	m=${t#*:}
+	h=${h#0}
+	m=${m#0}
+	echo $(( ${h:-0} * 60 + ${m:-0} ))
+}
+
+# List section names of a given type. Uses -X so anonymous sections are
+# reported with their real cfgXXXXXX names (usable by `uci get/set`).
+list_sections() {
+	uci -q -X show "$UCI_CONFIG" | sed -n "s/^$UCI_CONFIG\.\([^.=]*\)=$1\$/\1/p"
+}
+
+# Serialize concurrent invocations (LuCI buttons, cron, firewall include)
+acquire_lock() {
+	if command -v flock >/dev/null 2>&1; then
+		exec 9>"$LOCK_FILE"
+		flock 9
+	elif command -v lock >/dev/null 2>&1; then
+		lock "$LOCK_FILE"
+		trap 'lock -u "$LOCK_FILE"' EXIT
+		trap 'exit 1' INT TERM
+	fi
+}
+
+ensure_nft_set() {
+	nft list set $NFT_TABLE $NFT_SET >/dev/null 2>&1 && return 0
+	nft add set $NFT_TABLE $NFT_SET '{ type ether_addr; }' 2>/dev/null
+}
+
+# Print current blacklist members, one lowercase MAC per line
+current_blacklist() {
+	nft list set $NFT_TABLE $NFT_SET 2>/dev/null \
+		| grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' \
+		| tr 'A-Z' 'a-z' | sort -u
+}
+
+in_set() {
+	current_blacklist | grep -qx "$1"
+}
+
+do_block() {
+	local mac
+	mac=$(to_lower "$1")
+	valid_mac "$mac" || { echo "Error: invalid MAC '$1'" >&2; return 1; }
+	ensure_nft_set
+	in_set "$mac" && return 0
+	nft add element $NFT_TABLE $NFT_SET "{ $mac }" 2>/dev/null && \
+		log "Device ($mac) blocked from internet"
+}
+
+do_unblock() {
+	local mac
+	mac=$(to_lower "$1")
+	valid_mac "$mac" || { echo "Error: invalid MAC '$1'" >&2; return 1; }
+	ensure_nft_set
+	in_set "$mac" || return 0
+	nft delete element $NFT_TABLE $NFT_SET "{ $mac }" 2>/dev/null && \
+		log "Device ($mac) internet access unblocked"
+}
+
+find_client_sec_by_mac() {
+	local target c cur
+	target=$(to_lower "$1")
+	for c in $(list_sections client); do
+		cur=$(to_lower "$(uci -q get "$UCI_CONFIG.$c.mac")")
+		if [ "$cur" = "$target" ]; then
+			echo "$c"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Rules reference their client by MAC address (preferred) or, for legacy
+# configs, by section name.
+rule_matches_client() {
+	local ref="$1" sec="$2" mac="$3"
+	[ -z "$ref" ] && return 1
+	[ "$ref" = "$sec" ] && return 0
+	[ "$(to_lower "$ref")" = "$mac" ] && return 0
+	return 1
+}
+
+do_temp_pass() {
+	local mac mins sec_name expire
+	mac=$(to_lower "$1")
+	mins=$(to_int "$2")
+	[ "$mins" -gt 0 ] || mins=30
+	[ "$mins" -le 1440 ] || mins=1440
+
+	valid_mac "$mac" || { echo "Error: valid MAC required" >&2; exit 1; }
+	sec_name=$(find_client_sec_by_mac "$mac") || {
+		echo "Error: client section not found for $mac (save & apply first)" >&2
+		exit 1
+	}
+
+	expire=$(( $(date +%s) + mins * 60 ))
+	uci -q set "$UCI_CONFIG.$sec_name.override_until=$expire"
+	uci -q commit "$UCI_CONFIG"
+	do_unblock "$mac"
+	log "Device ($mac) temporary pass granted for $mins minutes"
+	do_update_cron
+}
+
+do_clear_temp_pass() {
+	local mac sec_name
+	mac=$(to_lower "$1")
+	valid_mac "$mac" || { echo "Error: valid MAC required" >&2; exit 1; }
+
+	if sec_name=$(find_client_sec_by_mac "$mac"); then
+		uci -q set "$UCI_CONFIG.$sec_name.override_until=0"
+		uci -q commit "$UCI_CONFIG"
+	fi
+	do_sync
+	do_update_cron
+}
+
+is_in_weekday_list() {
+	local target="$1" day
+	shift
+	[ "$target" = "0" ] && target=7
+	for day in "$@"; do
+		[ "$day" = "0" ] && day=7
+		[ "$day" = "$target" ] && return 0
+	done
+	return 1
+}
+
+# Uses globals CUR_DOW, PREV_DOW, CUR_MINS
+rule_active_now() {
+	local r="$1" b e wdays
+	b=$(hhmm_to_mins "$(uci -q get "$UCI_CONFIG.$r.block_time")") || return 1
+	e=$(hhmm_to_mins "$(uci -q get "$UCI_CONFIG.$r.resume_time")") || return 1
+	wdays=$(uci -q get "$UCI_CONFIG.$r.week_day")
+	[ -z "$wdays" ] && return 1
+
+	if [ "$b" -lt "$e" ]; then
+		# Same-day range (e.g. 14:00 - 18:00)
+		[ "$CUR_MINS" -ge "$b" ] && [ "$CUR_MINS" -lt "$e" ] && \
+			is_in_weekday_list "$CUR_DOW" $wdays && return 0
+	else
+		# Cross-midnight range (e.g. 20:20 - 06:00)
+		# 1. Evening portion: rule day is today
+		[ "$CUR_MINS" -ge "$b" ] && is_in_weekday_list "$CUR_DOW" $wdays && return 0
+		# 2. Morning portion: rule day was yesterday
+		[ "$CUR_MINS" -lt "$e" ] && is_in_weekday_list "$PREV_DOW" $wdays && return 0
+	fi
+	return 1
+}
+
+do_sync() {
+	ensure_nft_set
+
+	local global_enabled
+	global_enabled=$(uci -q get "$UCI_CONFIG.global.enabled")
+	if [ "${global_enabled:-1}" != "1" ]; then
+		nft flush set $NFT_TABLE $NFT_SET 2>/dev/null
+		return 0
+	fi
+
+	local now h m
+	set -- $(date '+%s %u %H %M')
+	now=$1
+	CUR_DOW=$2
+	h=${3#0}
+	m=${4#0}
+	CUR_MINS=$(( ${h:-0} * 60 + ${m:-0} ))
+	PREV_DOW=$(( CUR_DOW - 1 ))
+	[ "$PREV_DOW" -eq 0 ] && PREV_DOW=7
+
+	local uci_changed=0 want="" c r
+	local rules
+	rules=$(list_sections rule)
+
+	for c in $(list_sections client); do
+		local c_enabled c_mac c_override should_block=0
+		c_mac=$(to_lower "$(uci -q get "$UCI_CONFIG.$c.mac")")
+		valid_mac "$c_mac" || continue
+		c_enabled=$(uci -q get "$UCI_CONFIG.$c.enabled")
+		[ "${c_enabled:-1}" != "1" ] && continue
+
+		# Temporary pass override
+		c_override=$(to_int "$(uci -q get "$UCI_CONFIG.$c.override_until")")
+		if [ "$c_override" -gt 0 ]; then
+			if [ "$now" -lt "$c_override" ]; then
+				continue
+			fi
+			# Expired
+			uci -q set "$UCI_CONFIG.$c.override_until=0"
+			uci_changed=1
+		fi
+
+		for r in $rules; do
+			local r_enabled
+			r_enabled=$(uci -q get "$UCI_CONFIG.$r.enabled")
+			[ "${r_enabled:-1}" != "1" ] && continue
+			rule_matches_client "$(uci -q get "$UCI_CONFIG.$r.client")" "$c" "$c_mac" || continue
+			if rule_active_now "$r"; then
+				should_block=1
+				break
+			fi
+		done
+
+		[ "$should_block" -eq 1 ] && want="$want $c_mac"
+	done
+
+	# Reconcile nft set with desired state. Entries for clients that were
+	# deleted / disabled are removed as well, so nothing stays blocked forever.
+	local cur mac
+	cur=$(current_blacklist)
+	for mac in $want; do
+		case "$cur" in
+			*"$mac"*) ;;
+			*) do_block "$mac" ;;
+		esac
+	done
+	for mac in $cur; do
+		case " $want " in
+			*" $mac "*) ;;
+			*) do_unblock "$mac" ;;
+		esac
+	done
+
+	if [ "$uci_changed" -eq 1 ]; then
+		uci -q commit "$UCI_CONFIG"
+		# Drop the per-minute temp-pass check if no pass is active anymore
+		do_update_cron
+	fi
+}
+
+json_escape() {
+	printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+do_status() {
+	local now cur_date global_enabled bl_elements
+	now=$(date +%s)
+	cur_date=$(date)
+	global_enabled=$(uci -q get "$UCI_CONFIG.global.enabled")
+
+	ensure_nft_set
+	bl_elements=$(current_blacklist)
+
+	printf '{\n'
+	printf '  "system_time": "%s",\n' "$(json_escape "$cur_date")"
+	printf '  "timestamp": %d,\n' "$now"
+	printf '  "global_enabled": "%s",\n' "${global_enabled:-1}"
+	printf '  "blacklist": ['
+	local first=1 elem
+	for elem in $bl_elements; do
+		[ "$first" -eq 0 ] && printf ','
+		printf '\n    "%s"' "$elem"
+		first=0
+	done
+	printf '\n  ],\n'
+
+	printf '  "clients": ['
+	first=1
+	local c
+	for c in $(list_sections client); do
+		local c_name c_mac c_enabled c_override st="unblocked" remaining=0
+		c_name=$(uci -q get "$UCI_CONFIG.$c.name")
+		c_mac=$(to_lower "$(uci -q get "$UCI_CONFIG.$c.mac")")
+		c_enabled=$(uci -q get "$UCI_CONFIG.$c.enabled")
+		c_override=$(to_int "$(uci -q get "$UCI_CONFIG.$c.override_until")")
+
+		if [ "$c_override" -gt "$now" ]; then
+			st="temp_pass"
+			remaining=$(( c_override - now ))
+		elif [ -n "$c_mac" ] && echo "$bl_elements" | grep -qx "$c_mac"; then
+			st="blocked"
+		fi
+
+		[ "$first" -eq 0 ] && printf ','
+		printf '\n    {\n'
+		printf '      "id": "%s",\n' "$(json_escape "$c")"
+		printf '      "name": "%s",\n' "$(json_escape "$c_name")"
+		printf '      "mac": "%s",\n' "$(json_escape "$c_mac")"
+		printf '      "enabled": "%s",\n' "${c_enabled:-1}"
+		printf '      "status": "%s",\n' "$st"
+		printf '      "override_until": %d,\n' "$c_override"
+		printf '      "remaining_seconds": %d\n' "$remaining"
+		printf '    }'
+		first=0
+	done
+	printf '\n  ]\n'
+	printf '}\n'
+}
+
+# Convert UCI weekday (1=Mon..7=Sun) to cron weekday (0=Sun..6=Sat)
+cron_wday() {
+	[ "$1" = "7" ] && echo 0 || echo "$1"
+}
+
+do_update_cron() {
+	local tmp="/tmp/device_curfew.cron.$$"
+	touch "$CRON_FILE"
+	grep -v 'device_curfew_ctl' "$CRON_FILE" > "$tmp"
+
+	local global_enabled
+	global_enabled=$(uci -q get "$UCI_CONFIG.global.enabled")
+
+	if [ "${global_enabled:-1}" = "1" ]; then
+		local r
+		for r in $(list_sections rule); do
+			local r_enabled b e wdays w block_wdays="" resume_wdays=""
+			r_enabled=$(uci -q get "$UCI_CONFIG.$r.enabled")
+			[ "${r_enabled:-1}" != "1" ] && continue
+			b=$(hhmm_to_mins "$(uci -q get "$UCI_CONFIG.$r.block_time")") || continue
+			e=$(hhmm_to_mins "$(uci -q get "$UCI_CONFIG.$r.resume_time")") || continue
+			wdays=$(uci -q get "$UCI_CONFIG.$r.week_day")
+			[ -z "$wdays" ] && continue
+
+			for w in $wdays; do
+				case "$w" in [0-7]) ;; *) continue ;; esac
+				block_wdays="${block_wdays:+$block_wdays,}$(cron_wday "$w")"
+				if [ "$b" -ge "$e" ]; then
+					# Cross-midnight: resume happens on the following day
+					resume_wdays="${resume_wdays:+$resume_wdays,}$(cron_wday $(( w % 7 + 1 )))"
+				fi
+			done
+			[ -z "$block_wdays" ] && continue
+			[ -z "$resume_wdays" ] && resume_wdays="$block_wdays"
+
+			echo "$(( b % 60 )) $(( b / 60 )) * * $block_wdays $CTL sync $CRON_TAG" >> "$tmp"
+			echo "$(( e % 60 )) $(( e / 60 )) * * $resume_wdays $CTL sync $CRON_TAG" >> "$tmp"
+		done
+
+		# If a temporary pass is active, tick every minute to catch expiration
+		local now c ov
+		now=$(date +%s)
+		for c in $(list_sections client); do
+			ov=$(to_int "$(uci -q get "$UCI_CONFIG.$c.override_until")")
+			if [ "$ov" -gt "$now" ]; then
+				echo "* * * * * $CTL sync $CRON_TAG temp_check" >> "$tmp"
+				break
+			fi
+		done
+	fi
+
+	# Only rewrite crontab / restart cron when something actually changed
+	if [ "$(md5sum < "$tmp")" != "$(md5sum < "$CRON_FILE")" ]; then
+		cat "$tmp" > "$CRON_FILE"
+		/etc/init.d/cron restart >/dev/null 2>&1
+	fi
+	rm -f "$tmp"
+}
+
+usage() {
+	echo "Usage: $0 {block <mac>|unblock <mac>|temp_pass <mac> [mins]|clear_temp_pass <mac>|sync|status|update_cron}"
+	exit 1
+}
+
+case "$1" in
+	block|unblock|temp_pass|clear_temp_pass|sync|status|update_cron)
+		acquire_lock
+		;;
+	*)
+		usage
+		;;
+esac
+
+case "$1" in
+	block)           do_block "$2" || exit 1 ;;
+	unblock)         do_unblock "$2" || exit 1 ;;
+	temp_pass)       do_temp_pass "$2" "$3" ;;
+	clear_temp_pass) do_clear_temp_pass "$2" ;;
+	sync)            do_sync ;;
+	status)          do_status ;;
+	update_cron)     do_update_cron ;;
+esac
