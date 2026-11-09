@@ -70,28 +70,11 @@ device_curfew_ctl block 00:11:22:33:44:55             # 手动将设备加入阻
 device_curfew_ctl unblock 00:11:22:33:44:55           # 手动将设备解除阻断
 ```
 
-## 贡献者与共创团队 (Contributors)
+## 共创与致谢 (Credits)
 
-<table>
-  <tr>
-    <td align="center" width="160px">
-      <a href="https://github.com/fishyo">
-        <img src="https://github.com/fishyo.png" width="90px;" style="border-radius:50%;" alt="fishyo"/><br />
-        <sub><b>fishyo</b></sub>
-      </a><br />
-      <sub>👑 项目构想 / 架构设计 / 实机测试</sub>
-    </td>
-    <td align="center" width="160px">
-      <a href="https://gemini.google.com/">
-        <img src="https://raw.githubusercontent.com/lobehub/lobe-icons/main/packages/static-png/dark/gemini-color.png" width="90px;" style="border-radius:50%;" alt="Google Gemini"/><br />
-        <sub><b>Google Gemini</b></sub>
-      </a><br />
-      <sub>🤖 算法逻辑 / nftables 防火墙 / 前端 SPA</sub>
-    </td>
-  </tr>
-</table>
-
-本项目由 **[fishyo](https://github.com/fishyo)** 与 **Google Gemini** 结对共创完成。两者在产品功能定义、底层控制算法实现、nftables 原始链防火墙设计、LuCI JS SPA 单页应用及路由器真机调试上紧密配合。
+本项目由 **[fishyo](https://github.com/fishyo)** 与 **Google Gemini** 结对共创完成：
+- **fishyo**：产品构想、功能定义、OpenWrt 路由器硬件实机部署与真机调试。
+- **Google Gemini**：底层控制算法实现、nftables 原始链防火墙设计、LuCI JS SPA 单页应用及代码工程重构。
 
 ## 许可证
 
