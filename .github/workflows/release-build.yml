@@ -1,0 +1,90 @@
+name: Build and Attach Release Packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build IPK and Portable packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -n "$VERSION" ] || VERSION="1.0.0"
+          
+          PKG_NAME="luci-app-device-curfew"
+          IPK_FILE="${PKG_NAME}_${VERSION}-1_all.ipk"
+          PORTABLE_FILE="${PKG_NAME}_${VERSION}-1_portable.tar.gz"
+          
+          mkdir -p dist
+          TMP=$(mktemp -d)
+          mkdir -p "$TMP/data" "$TMP/control"
+          echo "2.0" > "$TMP/debian-binary"
+          
+          # 1. Prepare data
+          mkdir -p "$TMP/data/etc" "$TMP/data/usr" "$TMP/data/www"
+          cp -r root/* "$TMP/data/"
+          cp -r htdocs/* "$TMP/data/www/"
+          
+          chmod 755 "$TMP/data/etc/init.d/device_curfew" 2>/dev/null || true
+          chmod 755 "$TMP/data/etc/uci-defaults/luci-app-device-curfew" 2>/dev/null || true
+          chmod 755 "$TMP/data/usr/bin/device_curfew_ctl" 2>/dev/null || true
+          chmod 755 "$TMP/data/usr/share/device_curfew/firewall.include" 2>/dev/null || true
+          
+          # 2. Prepare control
+          cat <<EOF > "$TMP/control/control"
+          Package: ${PKG_NAME}
+          Version: ${VERSION}-1
+          Depends: luci-base, nftables
+          Section: luci
+          Architecture: all
+          Maintainer: fishyo <liweisp1990@gmail.com>
+          License: Apache-2.0
+          Description: LuCI support for Device Curfew & Parental Access Control on Firewall4 (nftables)
+          EOF
+          sed -i 's/^[ \t]*//' "$TMP/control/control"
+          
+          echo "/etc/config/device_curfew" > "$TMP/control/conffiles"
+          
+          cat <<'EOF' > "$TMP/control/postinst"
+          #!/bin/sh
+          [ -n "$IPKG_INSTROOT" ] || {
+              ( . /etc/uci-defaults/luci-app-device-curfew ) && rm -f /etc/uci-defaults/luci-app-device-curfew
+              exit 0
+          }
+          EOF
+          chmod 755 "$TMP/control/postinst"
+          
+          cat <<'EOF' > "$TMP/control/prerm"
+          #!/bin/sh
+          [ -n "$IPKG_INSTROOT" ] || {
+              /etc/init.d/device_curfew stop 2>/dev/null
+              /etc/init.d/device_curfew disable 2>/dev/null
+              exit 0
+          }
+          EOF
+          chmod 755 "$TMP/control/prerm"
+          
+          # 3. Archive IPK
+          ( cd "$TMP/data" && tar -czf "$TMP/data.tar.gz" . )
+          ( cd "$TMP/control" && tar -czf "$TMP/control.tar.gz" . )
+          ( cd "$TMP" && tar -czf "${GITHUB_WORKSPACE}/dist/${IPK_FILE}" ./debian-binary ./control.tar.gz ./data.tar.gz )
+          
+          # 4. Archive Portable tar.gz
+          ( cd "$TMP/data" && tar -czf "${GITHUB_WORKSPACE}/dist/${PORTABLE_FILE}" etc usr www )
+          
+          rm -rf "$TMP"
+          ls -lh dist/
+
+      - name: Upload binaries to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
