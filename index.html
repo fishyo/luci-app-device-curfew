@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>luci-app-device-curfew OpenWrt 软件源</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #24292f; }
+    h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+    code, pre { background: #f6f8fa; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    pre { padding: 14px; overflow-x: auto; }
+    code { padding: 2px 5px; font-size: 90%; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card { border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; margin: 16px 0; background: #fafbfc; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; background: #ddf4ff; color: #0969da; }
+    .note { background: #fff8c5; border-left: 4px solid #d4a72c; padding: 12px; margin: 16px 0; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>luci-app-device-curfew 软件源</h1>
+  <p>基于 firewall4 (nftables) 的 OpenWrt 局域网设备网络宵禁与家长管控 LuCI 应用官方源。</p>
+
+  <div class="note">
+    <strong>提示：</strong>本软件源始终保持为最新稳定版本覆盖策略。如需历史版本回滚，请前往 <a href="https://github.com/fishyo/luci-app-device-curfew/releases" target="_blank">GitHub Releases</a> 下载离线包。
+  </div>
+
+  <h2>1. OpenWrt 25.x 软件源 (apk)</h2>
+  <div class="card">
+    <span class="badge">apk v3 格式</span>
+    <p>导入签名公钥（安全校验非空）并添加软件源：</p>
+    <pre># 1. 导入源签名公钥（如源已签名）
+mkdir -p /etc/apk/keys
+wget -q -O /tmp/fishyo-device-curfew.pem https://fishyo.github.io/luci-app-device-curfew/apk/fishyo-device-curfew.pem 2>/dev/null || true
+if [ -s /tmp/fishyo-device-curfew.pem ] &amp;&amp; grep -q 'BEGIN PUBLIC KEY' /tmp/fishyo-device-curfew.pem 2>/dev/null; then
+    mv /tmp/fishyo-device-curfew.pem /etc/apk/keys/fishyo-device-curfew.pem
+else
+    rm -f /tmp/fishyo-device-curfew.pem
+fi
+
+# 2. 添加软件源
+echo "https://fishyo.github.io/luci-app-device-curfew/apk/packages.adb" > /etc/apk/repositories.d/device-curfew.list
+
+# 3. 更新并安装
+apk update
+apk add luci-app-device-curfew</pre>
+    <p>备用源直链 (Raw GitHub)：<code>https://raw.githubusercontent.com/fishyo/luci-app-device-curfew/gh-pages/apk/packages.adb</code></p>
+  </div>
+
+  <h2>2. OpenWrt 22.03 ~ 24.10 软件源 (opkg)</h2>
+  <div class="card">
+    <span class="badge">opkg / ipk 格式</span>
+    <p>在 <code>/etc/opkg/customfeeds.conf</code> 添加源：</p>
+    <pre># 1. 添加软件源
+echo "src/gz fishyo_device_curfew https://fishyo.github.io/luci-app-device-curfew/opkg" >> /etc/opkg/customfeeds.conf
+
+# 2. 更新并安装
+opkg update
+opkg install luci-app-device-curfew</pre>
+  </div>
+
+  <h2>3. 目录与构建产物</h2>
+  <ul>
+    <li><a href="apk/packages.adb">apk/packages.adb</a> (APK v3 索引数据库)</li>
+    <li><a href="apk/fishyo-device-curfew.pem">apk/fishyo-device-curfew.pem</a> (APK 签名公钥，如已签名)</li>
+    <li><a href="opkg/Packages.gz">opkg/Packages.gz</a> (OPKG 索引)</li>
+    <li><a href="https://github.com/fishyo/luci-app-device-curfew">GitHub 项目主页</a></li>
+  </ul>
+</body>
+</html>

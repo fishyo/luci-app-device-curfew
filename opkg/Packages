@@ -1,0 +1,12 @@
+Package: luci-app-device-curfew
+Version: 1.0.0-1
+Depends: luci-base, firewall4
+Section: luci
+Architecture: all
+Maintainer: fishyo <liweisp1990@gmail.com>
+License: Apache-2.0
+Description: LuCI support for Device Curfew & Parental Access Control on Firewall4 (nftables)
+Filename: luci-app-device-curfew_1.0.0-1_all.ipk
+Size: 11913
+SHA256sum: a8930d638f9b87446a315ef236d4e7e3daeea7d58a807e617aba93d4d0d48974
+
