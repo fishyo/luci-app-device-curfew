@@ -1,8 +1,14 @@
-name: Build and Attach Release Packages
+name: Build, Release and Publish Feed
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0 or v1.0.0)'
+        required: false
+        default: '1.0.0'
 
 permissions:
   contents: write
@@ -14,55 +20,103 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build IPK and Portable packages
+      - name: Setup environment and dependencies
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends openssl tar gzip curl
+
+      - name: Install apk-tools v3 (apk.static)
+        run: |
+          ALPINE_REPO="https://dl-cdn.alpinelinux.org/alpine/edge/main/x86_64"
+          echo "Resolving latest apk-tools-static package from ${ALPINE_REPO}..."
+          APK_PKG=$(curl -fsSL "${ALPINE_REPO}/" | grep -o 'apk-tools-static-3\.[0-9.]\+-r[0-9]\+\.apk' | sort -V | tail -n 1)
+          if [ -z "$APK_PKG" ]; then
+            ALPINE_REPO="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64"
+            echo "Falling back to ${ALPINE_REPO}..."
+            APK_PKG=$(curl -fsSL "${ALPINE_REPO}/" | grep -o 'apk-tools-static-3\.[0-9.]\+-r[0-9]\+\.apk' | sort -V | tail -n 1)
+          fi
+          if [ -z "$APK_PKG" ]; then
+            echo "Error: Unable to locate apk-tools-static package in Alpine repository" >&2
+            exit 1
+          fi
+          echo "Downloading ${ALPINE_REPO}/${APK_PKG}..."
+          curl -fsSL "${ALPINE_REPO}/${APK_PKG}" -o /tmp/apk-tools-static.apk
+          tar -xf /tmp/apk-tools-static.apk -C /tmp sbin/apk.static
+          chmod +x /tmp/sbin/apk.static
+          sudo mv /tmp/sbin/apk.static /usr/local/bin/apk.static
+          rm -f /tmp/apk-tools-static.apk
+          apk.static --version
+
+      - name: Build packages (IPK, APK v3, Portable) and generate feeds
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            RAW_VER="$INPUT_VERSION"
+          else
+            RAW_VER="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${RAW_VER#v}"
           [ -n "$VERSION" ] || VERSION="1.0.0"
-          
+
+          # Strict validation of version string to prevent shell injection
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$'; then
+            echo "Error: Invalid version format: '$VERSION'" >&2
+            exit 1
+          fi
+
+          echo "Building packages for version: ${VERSION}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
           PKG_NAME="luci-app-device-curfew"
           IPK_FILE="${PKG_NAME}_${VERSION}-1_all.ipk"
+          APK_FILE="${PKG_NAME}-${VERSION}-r1.apk"
           PORTABLE_FILE="${PKG_NAME}_${VERSION}-1_portable.tar.gz"
-          
-          mkdir -p dist
-          TMP=$(mktemp -d)
-          mkdir -p "$TMP/data" "$TMP/control"
-          echo "2.0" > "$TMP/debian-binary"
-          
-          # 1. Prepare data
-          mkdir -p "$TMP/data/etc" "$TMP/data/usr" "$TMP/data/www"
-          cp -r root/* "$TMP/data/"
-          cp -r htdocs/* "$TMP/data/www/"
-          
-          chmod 755 "$TMP/data/etc/init.d/device_curfew" 2>/dev/null || true
-          chmod 755 "$TMP/data/etc/uci-defaults/luci-app-device-curfew" 2>/dev/null || true
-          chmod 755 "$TMP/data/usr/bin/device_curfew_ctl" 2>/dev/null || true
-          chmod 755 "$TMP/data/usr/share/device_curfew/firewall.include" 2>/dev/null || true
-          
-          # 2. Prepare control
-          cat <<EOF > "$TMP/control/control"
+
+          mkdir -p dist feed/apk feed/opkg
+
+          # ========================================================
+          # 1. Build IPK and Portable packages
+          # ========================================================
+          TMP_IPK=$(mktemp -d)
+          mkdir -p "$TMP_IPK/data/etc" "$TMP_IPK/data/usr" "$TMP_IPK/data/www" "$TMP_IPK/control"
+          echo "2.0" > "$TMP_IPK/debian-binary"
+
+          cp -r root/* "$TMP_IPK/data/"
+          cp -r htdocs/* "$TMP_IPK/data/www/"
+
+          chmod 755 "$TMP_IPK/data/etc/init.d/device_curfew" 2>/dev/null || true
+          chmod 755 "$TMP_IPK/data/etc/uci-defaults/luci-app-device-curfew" 2>/dev/null || true
+          chmod 755 "$TMP_IPK/data/usr/bin/device_curfew_ctl" 2>/dev/null || true
+          chmod 755 "$TMP_IPK/data/usr/share/device_curfew/firewall.include" 2>/dev/null || true
+
+          cat <<EOF > "$TMP_IPK/control/control"
           Package: ${PKG_NAME}
           Version: ${VERSION}-1
-          Depends: luci-base, nftables
+          Depends: luci-base, firewall4
           Section: luci
           Architecture: all
           Maintainer: fishyo <liweisp1990@gmail.com>
           License: Apache-2.0
           Description: LuCI support for Device Curfew & Parental Access Control on Firewall4 (nftables)
           EOF
-          sed -i 's/^[ \t]*//' "$TMP/control/control"
-          
-          echo "/etc/config/device_curfew" > "$TMP/control/conffiles"
-          
-          cat <<'EOF' > "$TMP/control/postinst"
+          sed -i 's/^[ \t]*//' "$TMP_IPK/control/control"
+
+          echo "/etc/config/device_curfew" > "$TMP_IPK/control/conffiles"
+
+          cat <<'EOF' > "$TMP_IPK/control/postinst"
           #!/bin/sh
           [ -n "$IPKG_INSTROOT" ] || {
-              ( . /etc/uci-defaults/luci-app-device-curfew ) && rm -f /etc/uci-defaults/luci-app-device-curfew
+              [ -f /etc/uci-defaults/luci-app-device-curfew ] && ( . /etc/uci-defaults/luci-app-device-curfew ) && rm -f /etc/uci-defaults/luci-app-device-curfew
               exit 0
           }
           EOF
-          chmod 755 "$TMP/control/postinst"
-          
-          cat <<'EOF' > "$TMP/control/prerm"
+          sed -i 's/^[ \t]*//' "$TMP_IPK/control/postinst"
+          chmod 755 "$TMP_IPK/control/postinst"
+
+          cat <<'EOF' > "$TMP_IPK/control/prerm"
           #!/bin/sh
           [ -n "$IPKG_INSTROOT" ] || {
               /etc/init.d/device_curfew stop 2>/dev/null
@@ -70,21 +124,223 @@ jobs:
               exit 0
           }
           EOF
-          chmod 755 "$TMP/control/prerm"
-          
-          # 3. Archive IPK
-          ( cd "$TMP/data" && tar -czf "$TMP/data.tar.gz" . )
-          ( cd "$TMP/control" && tar -czf "$TMP/control.tar.gz" . )
-          ( cd "$TMP" && tar -czf "${GITHUB_WORKSPACE}/dist/${IPK_FILE}" ./debian-binary ./control.tar.gz ./data.tar.gz )
-          
-          # 4. Archive Portable tar.gz
-          ( cd "$TMP/data" && tar -czf "${GITHUB_WORKSPACE}/dist/${PORTABLE_FILE}" etc usr www )
-          
-          rm -rf "$TMP"
+          sed -i 's/^[ \t]*//' "$TMP_IPK/control/prerm"
+          chmod 755 "$TMP_IPK/control/prerm"
+
+          # Validate control scripts format and syntax
+          for s in "$TMP_IPK/control/postinst" "$TMP_IPK/control/prerm"; do
+            head_line=$(head -n 1 "$s")
+            if [ "$head_line" != "#!/bin/sh" ]; then
+              echo "Error: $s first line is not '#!/bin/sh' (got: '$head_line')" >&2
+              exit 1
+            fi
+            sh -n "$s" || { echo "Error: $s shell syntax error" >&2; exit 1; }
+          done
+
+          ( cd "$TMP_IPK/data" && tar --owner=0 --group=0 --numeric-owner -czf "$TMP_IPK/data.tar.gz" . )
+          ( cd "$TMP_IPK/control" && tar --owner=0 --group=0 --numeric-owner -czf "$TMP_IPK/control.tar.gz" . )
+          ( cd "$TMP_IPK" && tar --owner=0 --group=0 --numeric-owner -czf "${GITHUB_WORKSPACE}/dist/${IPK_FILE}" debian-binary control.tar.gz data.tar.gz )
+          ( cd "$TMP_IPK/data" && tar --owner=0 --group=0 --numeric-owner -czf "${GITHUB_WORKSPACE}/dist/${PORTABLE_FILE}" etc usr www )
+
+          # Generate opkg feed index
+          cp "dist/${IPK_FILE}" "feed/opkg/${IPK_FILE}"
+          IPK_SIZE=$(stat -c%s "feed/opkg/${IPK_FILE}")
+          IPK_SHA256=$(sha256sum "feed/opkg/${IPK_FILE}" | awk '{print $1}')
+          cat "$TMP_IPK/control/control" > feed/opkg/Packages
+          echo "Filename: ${IPK_FILE}" >> feed/opkg/Packages
+          echo "Size: ${IPK_SIZE}" >> feed/opkg/Packages
+          echo "SHA256sum: ${IPK_SHA256}" >> feed/opkg/Packages
+          echo "" >> feed/opkg/Packages
+          gzip -9nc feed/opkg/Packages > feed/opkg/Packages.gz
+
+          rm -rf "$TMP_IPK"
+
+          # ========================================================
+          # 2. Build APK (v3) package and OpenWrt conffiles
+          # ========================================================
+          TMP_APK=$(mktemp -d)
+          mkdir -p "$TMP_APK/data/etc" "$TMP_APK/data/usr" "$TMP_APK/data/www" "$TMP_APK/data/lib/apk/packages"
+
+          cp -r root/* "$TMP_APK/data/"
+          cp -r htdocs/* "$TMP_APK/data/www/"
+
+          chmod 755 "$TMP_APK/data/etc/init.d/device_curfew" 2>/dev/null || true
+          chmod 755 "$TMP_APK/data/etc/uci-defaults/luci-app-device-curfew" 2>/dev/null || true
+          chmod 755 "$TMP_APK/data/usr/bin/device_curfew_ctl" 2>/dev/null || true
+          chmod 755 "$TMP_APK/data/usr/share/device_curfew/firewall.include" 2>/dev/null || true
+
+          # OpenWrt conffiles registration in APK v3
+          echo "/etc/config/device_curfew" > "$TMP_APK/data/lib/apk/packages/${PKG_NAME}.conffiles"
+          CONF_CSUM=$(sha256sum "$TMP_APK/data/etc/config/device_curfew" | awk '{print $1}')
+          echo "/etc/config/device_curfew ${CONF_CSUM}" > "$TMP_APK/data/lib/apk/packages/${PKG_NAME}.conffiles_static"
+
+          cat <<'EOF' > "$TMP_APK/post-install"
+          #!/bin/sh
+          [ -n "$IPKG_INSTROOT" ] || {
+              [ -f /etc/uci-defaults/luci-app-device-curfew ] && ( . /etc/uci-defaults/luci-app-device-curfew ) && rm -f /etc/uci-defaults/luci-app-device-curfew
+              exit 0
+          }
+          EOF
+          sed -i 's/^[ \t]*//' "$TMP_APK/post-install"
+          chmod 755 "$TMP_APK/post-install"
+
+          cat <<'EOF' > "$TMP_APK/pre-deinstall"
+          #!/bin/sh
+          [ -n "$IPKG_INSTROOT" ] || {
+              /etc/init.d/device_curfew stop 2>/dev/null
+              /etc/init.d/device_curfew disable 2>/dev/null
+              exit 0
+          }
+          EOF
+          sed -i 's/^[ \t]*//' "$TMP_APK/pre-deinstall"
+          chmod 755 "$TMP_APK/pre-deinstall"
+
+          # Validate APK lifecycle scripts format and syntax
+          for s in "$TMP_APK/post-install" "$TMP_APK/pre-deinstall"; do
+            head_line=$(head -n 1 "$s")
+            if [ "$head_line" != "#!/bin/sh" ]; then
+              echo "Error: $s first line is not '#!/bin/sh' (got: '$head_line')" >&2
+              exit 1
+            fi
+            sh -n "$s" || { echo "Error: $s shell syntax error" >&2; exit 1; }
+          done
+
+          apk.static mkpkg \
+            --info "name:${PKG_NAME}" \
+            --info "version:${VERSION}-r1" \
+            --info "arch:noarch" \
+            --info "description:LuCI support for Device Curfew & Parental Access Control on Firewall4 (nftables)" \
+            --info "license:Apache-2.0" \
+            --info "maintainer:fishyo <liweisp1990@gmail.com>" \
+            --info "url:https://github.com/fishyo/luci-app-device-curfew" \
+            --info "depends:luci-base firewall4" \
+            --script "post-install:$TMP_APK/post-install" \
+            --script "post-upgrade:$TMP_APK/post-install" \
+            --script "pre-deinstall:$TMP_APK/pre-deinstall" \
+            --files "$TMP_APK/data" \
+            --output "dist/${APK_FILE}"
+
+          cp "dist/${APK_FILE}" "feed/apk/${APK_FILE}"
+          rm -rf "$TMP_APK"
+
+          # ========================================================
+          # 3. Handle APK v3 signing and packages.adb index
+          # ========================================================
+          if [ -n "$APK_SIGNING_KEY" ]; then
+            echo "Signing APK package and generating signed packages.adb index..."
+            KEY_FILE=$(mktemp)
+            trap 'rm -f "$KEY_FILE"' EXIT
+            ( umask 077 && printf '%s\n' "$APK_SIGNING_KEY" > "$KEY_FILE" )
+            openssl pkey -in "$KEY_FILE" -pubout -out feed/apk/fishyo-device-curfew.pem
+            cp feed/apk/fishyo-device-curfew.pem dist/
+            apk.static adbsign --allow-untrusted --sign-key "$KEY_FILE" "dist/${APK_FILE}"
+            cp "dist/${APK_FILE}" "feed/apk/${APK_FILE}"
+            apk.static mkndx --allow-untrusted --sign-key "$KEY_FILE" --output feed/apk/packages.adb feed/apk/*.apk
+            rm -f "$KEY_FILE"
+            trap - EXIT
+            echo "Successfully generated signed packages.adb and public key fishyo-device-curfew.pem"
+          else
+            echo "::warning::APK_SIGNING_KEY secret is not configured! Generating unsigned packages.adb index..."
+            apk.static mkndx --allow-untrusted --output feed/apk/packages.adb feed/apk/*.apk
+          fi
+
+          cp feed/apk/packages.adb dist/packages.adb
+
+          # ========================================================
+          # 4. Generate GitHub Pages landing index.html
+          # ========================================================
+          cat <<'EOF' > feed/index.html
+          <!DOCTYPE html>
+          <html lang="zh-CN">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>luci-app-device-curfew OpenWrt 软件源</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #24292f; }
+              h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+              code, pre { background: #f6f8fa; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+              pre { padding: 14px; overflow-x: auto; }
+              code { padding: 2px 5px; font-size: 90%; }
+              a { color: #0969da; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .card { border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; margin: 16px 0; background: #fafbfc; }
+              .badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; background: #ddf4ff; color: #0969da; }
+              .note { background: #fff8c5; border-left: 4px solid #d4a72c; padding: 12px; margin: 16px 0; font-size: 14px; }
+            </style>
+          </head>
+          <body>
+            <h1>luci-app-device-curfew 软件源</h1>
+            <p>基于 firewall4 (nftables) 的 OpenWrt 局域网设备网络宵禁与家长管控 LuCI 应用官方源。</p>
+
+            <div class="note">
+              <strong>提示：</strong>本软件源始终保持为最新稳定版本覆盖策略。如需历史版本回滚，请前往 <a href="https://github.com/fishyo/luci-app-device-curfew/releases" target="_blank">GitHub Releases</a> 下载离线包。
+            </div>
+
+            <h2>1. OpenWrt 25.x 软件源 (apk)</h2>
+            <div class="card">
+              <span class="badge">apk v3 格式</span>
+              <p>导入签名公钥（安全校验非空）并添加软件源：</p>
+              <pre># 1. 导入源签名公钥（如源已签名）
+          mkdir -p /etc/apk/keys
+          wget -q -O /tmp/fishyo-device-curfew.pem https://fishyo.github.io/luci-app-device-curfew/apk/fishyo-device-curfew.pem 2>/dev/null || true
+          if [ -s /tmp/fishyo-device-curfew.pem ] &amp;&amp; grep -q 'BEGIN PUBLIC KEY' /tmp/fishyo-device-curfew.pem 2>/dev/null; then
+              mv /tmp/fishyo-device-curfew.pem /etc/apk/keys/fishyo-device-curfew.pem
+          else
+              rm -f /tmp/fishyo-device-curfew.pem
+          fi
+
+          # 2. 添加软件源
+          echo "https://fishyo.github.io/luci-app-device-curfew/apk/packages.adb" > /etc/apk/repositories.d/device-curfew.list
+
+          # 3. 更新并安装
+          apk update
+          apk add luci-app-device-curfew</pre>
+              <p>备用源直链 (Raw GitHub)：<code>https://raw.githubusercontent.com/fishyo/luci-app-device-curfew/gh-pages/apk/packages.adb</code></p>
+            </div>
+
+            <h2>2. OpenWrt 22.03 ~ 24.10 软件源 (opkg)</h2>
+            <div class="card">
+              <span class="badge">opkg / ipk 格式</span>
+              <p>在 <code>/etc/opkg/customfeeds.conf</code> 添加源：</p>
+              <pre># 1. 添加软件源
+          echo "src/gz fishyo_device_curfew https://fishyo.github.io/luci-app-device-curfew/opkg" >> /etc/opkg/customfeeds.conf
+
+          # 2. 更新并安装
+          opkg update
+          opkg install luci-app-device-curfew</pre>
+            </div>
+
+            <h2>3. 目录与构建产物</h2>
+            <ul>
+              <li><a href="apk/packages.adb">apk/packages.adb</a> (APK v3 索引数据库)</li>
+              <li><a href="apk/fishyo-device-curfew.pem">apk/fishyo-device-curfew.pem</a> (APK 签名公钥，如已签名)</li>
+              <li><a href="opkg/Packages.gz">opkg/Packages.gz</a> (OPKG 索引)</li>
+              <li><a href="https://github.com/fishyo/luci-app-device-curfew">GitHub 项目主页</a></li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+          echo "Dist files generated:"
           ls -lh dist/
+          echo "Feed files generated:"
+          find feed -type f -exec ls -lh {} +
+
+      - name: Deploy software feed to GitHub Pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./feed
+          publish_branch: gh-pages
+          keep_files: false
 
       - name: Upload binaries to Release
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          TAG_NAME="${GITHUB_REF_NAME}"
+          [ -n "$TAG_NAME" ] && [ "$TAG_NAME" != "main" ] && [ "$TAG_NAME" != "master" ] || TAG_NAME="v${VERSION}"
+          echo "Attempting to upload assets to release: ${TAG_NAME}"
+          gh release upload "${TAG_NAME}" dist/* --clobber 2>/dev/null || echo "Release upload skipped (release ${TAG_NAME} not published or running in branch dispatch)."

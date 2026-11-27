@@ -377,7 +377,7 @@ do_update_cron() {
 	fi
 
 	# Only rewrite crontab / restart cron when something actually changed
-	if [ "$(md5sum < "$tmp")" != "$(md5sum < "$CRON_FILE")" ]; then
+	if ! cmp -s "$tmp" "$CRON_FILE"; then
 		cat "$tmp" > "$CRON_FILE"
 		/etc/init.d/cron restart >/dev/null 2>&1
 	fi

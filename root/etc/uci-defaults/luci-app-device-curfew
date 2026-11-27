@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Register fw4 script include: restores the blacklist after every firewall reload
-if [ "$(uci -q get firewall.device_curfew)" != "include" ]; then
+if [ "x$(uci -q get firewall.device_curfew)" != "xinclude" ]; then
 	uci -q batch <<-EOF
 		set firewall.device_curfew=include
 		set firewall.device_curfew.type='script'
@@ -29,9 +29,9 @@ fi
 
 chmod +x /usr/bin/device_curfew_ctl /usr/share/device_curfew/firewall.include 2>/dev/null
 
-/etc/init.d/device_curfew enable
-/etc/init.d/firewall reload
-/etc/init.d/device_curfew restart
+[ -x /etc/init.d/device_curfew ] && /etc/init.d/device_curfew enable 2>/dev/null || true
+[ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload 2>/dev/null || true
+[ -x /etc/init.d/device_curfew ] && /etc/init.d/device_curfew restart 2>/dev/null || true
 
 rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null
 

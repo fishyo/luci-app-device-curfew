@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI support for Device Curfew & Parental Access Control
-LUCI_DEPENDS:=+luci-base +nftables
+LUCI_DEPENDS:=+luci-base +firewall4
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-device-curfew
